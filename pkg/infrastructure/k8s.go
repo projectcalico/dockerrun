@@ -16,7 +16,6 @@ package infrastructure
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/projectcalico/dockerrun/pkg/containers"
 	"github.com/projectcalico/dockerrun/pkg/utils"
@@ -25,7 +24,6 @@ import (
 func RunK8sApiserver(etcdIp string) (*containers.Container, error) {
 	return containers.Run("apiserver",
 		containers.RunOpts{AutoRemove: true},
-		"-v", os.Getenv("PRIVATE_KEY")+":/private.key",
 		utils.Config.K8sImage,
 		"/hyperkube", "apiserver",
 		"--service-cluster-ip-range=10.101.0.0/16",
@@ -33,14 +31,12 @@ func RunK8sApiserver(etcdIp string) (*containers.Container, error) {
 		"--insecure-port=8080", // allow insecure connection from controller manager.
 		"--insecure-bind-address=0.0.0.0",
 		fmt.Sprintf("--etcd-servers=http://%s:2379", etcdIp),
-		"--service-account-key-file=/private.key",
 	)
 }
 
 func RunK8sControllerManager(apiserverIp string) (*containers.Container, error) {
 	return containers.Run("controller-manager",
 		containers.RunOpts{AutoRemove: true},
-		"-v", os.Getenv("PRIVATE_KEY")+":/private.key",
 		utils.Config.K8sImage,
 		"/hyperkube", "controller-manager",
 		fmt.Sprintf("--master=%v:8080", apiserverIp),
@@ -48,6 +44,5 @@ func RunK8sControllerManager(apiserverIp string) (*containers.Container, error) 
 		"--allocate-node-cidrs=true",
 		"--cluster-cidr=192.168.0.0/16",
 		"--v=5",
-		"--service-account-private-key-file=/private.key",
 	)
 }
