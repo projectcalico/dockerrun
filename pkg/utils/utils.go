@@ -23,7 +23,6 @@ import (
 
 	"github.com/kelseyhightower/envconfig"
 	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -47,19 +46,11 @@ func init() {
 
 var Ctx = context.Background()
 
-func Run(command string, args ...string) {
-	_ = run(true, command, args...)
-}
-
-func RunMayFail(command string, args ...string) error {
-	return run(false, command, args...)
-}
-
 var currentTestOutput = []string{}
 
 var LastRunOutput string
 
-func run(checkNoError bool, command string, args ...string) error {
+func Run(command string, args ...string) error {
 	outputBytes, err := Command(command, args...).CombinedOutput()
 	currentTestOutput = append(currentTestOutput, fmt.Sprintf("Command: %v %v\n", command, args))
 	currentTestOutput = append(currentTestOutput, string(outputBytes))
@@ -70,9 +61,7 @@ func run(checkNoError bool, command string, args ...string) error {
 			"args":    args,
 			"output":  string(outputBytes)}).WithError(err).Warning("Command failed")
 	}
-	if checkNoError {
-		Expect(err).NotTo(HaveOccurred())
-	}
+
 	return err
 }
 

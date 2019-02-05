@@ -15,14 +15,11 @@
 package infrastructure
 
 import (
-	log "github.com/sirupsen/logrus"
-
 	"github.com/projectcalico/dockerrun/pkg/containers"
 	"github.com/projectcalico/dockerrun/pkg/utils"
 )
 
-func RunEtcd() *containers.Container {
-	log.Info("Starting etcd")
+func RunEtcd() (*containers.Container, error) {
 	return containers.Run("etcd",
 		containers.RunOpts{AutoRemove: true},
 		"--privileged", // So that we can add routes inside the etcd container,

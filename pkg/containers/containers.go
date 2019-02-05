@@ -16,6 +16,7 @@ package containers
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -27,7 +28,6 @@ import (
 	"sync"
 	"time"
 
-	. "github.com/onsi/gomega"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/projectcalico/dockerrun/pkg/set"
@@ -54,10 +54,10 @@ type watch struct {
 
 var containerIdx = 0
 
-func (c *Container) Stop() {
+func (c *Container) Stop() error {
 	if c == nil {
 		log.Info("Stop no-op because nil container")
-		return
+		return nil
 	}
 
 	logCxt := log.WithField("container", c.Name)
@@ -65,7 +65,7 @@ func (c *Container) Stop() {
 	if c.runCmd == nil {
 		logCxt.Info("Stop no-op because container is not running")
 		c.mutex.Unlock()
-		return
+		return nil
 	}
 	c.mutex.Unlock()
 
@@ -79,13 +79,17 @@ func (c *Container) Stop() {
 	// Wait for the container to exit, then escalate to killing it.
 	startTime := time.Now()
 	for {
-		if !c.ListedInDockerPS() {
+		isRunning, err := c.ListedInDockerPS()
+		if err != nil {
+			return err
+		}
+		if !isRunning {
 			// Container has stopped.  Mkae sure the docker CLI command is dead (it should be already)
 			// and wait for its log.
 			logCxt.Info("Container stopped (no longer listed in 'docker ps')")
 			withTimeoutPanic(logCxt, 5*time.Second, func() { c.signalDockerRun(os.Kill) })
 			withTimeoutPanic(logCxt, 10*time.Second, func() { c.logFinished.Wait() })
-			return
+			return nil
 		}
 		if time.Since(startTime) > 2*time.Second {
 			logCxt.Info("Container didn't stop, asking docker to kill it")
@@ -103,6 +107,8 @@ func (c *Container) Stop() {
 	logCxt.Info("Container stopped")
 	withTimeoutPanic(logCxt, 5*time.Second, func() { c.signalDockerRun(os.Kill) })
 	withTimeoutPanic(logCxt, 10*time.Second, func() { c.logFinished.Wait() })
+
+	return nil
 }
 
 func withTimeoutPanic(logCxt *log.Entry, t time.Duration, f func()) {
@@ -151,7 +157,7 @@ type RunOpts struct {
 	AutoRemove bool
 }
 
-func Run(namePrefix string, opts RunOpts, args ...string) (c *Container) {
+func Run(namePrefix string, opts RunOpts, args ...string) (c *Container, err error) {
 
 	// Build unique container name and struct.
 	containerIdx++
@@ -172,13 +178,18 @@ func Run(namePrefix string, opts RunOpts, args ...string) (c *Container) {
 
 	// Get the command's output pipes, so we can merge those into the test's own logging.
 	stdout, err := c.runCmd.StdoutPipe()
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get stdout pipe: %v", err)
+	}
 	stderr, err := c.runCmd.StderrPipe()
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get stderr pipe: %v", err)
+	}
 
 	// Start the container running.
-	err = c.runCmd.Start()
-	Expect(err).NotTo(HaveOccurred())
+	if err := c.runCmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to run container start cmd: %v", err)
+	}
 
 	// Merge container's output into our own logging.
 	c.logFinished.Add(2)
@@ -187,11 +198,20 @@ func Run(namePrefix string, opts RunOpts, args ...string) (c *Container) {
 
 	// Note: it might take a long time for the container to start running, e.g. if the image
 	// needs to be downloaded.
-	c.WaitUntilRunning()
+	if err := c.WaitUntilRunning(); err != nil {
+		return nil, fmt.Errorf("container failed to run: %v", err)
+	}
 
 	// Fill in rest of container struct.
-	c.IP = c.GetIP()
-	c.Hostname = c.GetHostname()
+	c.IP, err = c.GetIP()
+	if err != nil {
+		return nil, err
+	}
+	c.Hostname, err = c.GetHostname()
+	if err != nil {
+		return nil, err
+	}
+
 	c.binaries = set.New()
 	log.WithField("container", c).Info("Container now running")
 	return
@@ -216,36 +236,47 @@ func (c *Container) WatchStdoutFor(re *regexp.Regexp) chan struct{} {
 
 // Start executes "docker start" on a container. Useful when used after Stop()
 // to restart a container.
-func (c *Container) Start() {
+func (c *Container) Start() error {
 	c.runCmd = utils.Command("docker", "start", "--attach", c.Name)
 
 	stdout, err := c.runCmd.StdoutPipe()
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return fmt.Errorf("failed to get stdout pipe: %v", err)
+	}
 	stderr, err := c.runCmd.StderrPipe()
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return fmt.Errorf("failed to get stderr pipe: %v", err)
+	}
 
 	// Start the container running.
-	err = c.runCmd.Start()
-	Expect(err).NotTo(HaveOccurred())
+	if err := c.runCmd.Start(); err != nil {
+		return err
+	}
 
 	// Merge container's output into our own logging.
 	c.logFinished.Add(2)
 	go c.copyOutputToLog("stdout", stdout, &c.logFinished, &c.stdoutWatches)
 	go c.copyOutputToLog("stderr", stderr, &c.logFinished, nil)
 
-	c.WaitUntilRunning()
+	if err := c.WaitUntilRunning(); err != nil {
+		return err
+	}
 
 	log.WithField("container", c).Info("Container now running")
+
+	return nil
 }
 
 // Remove deletes a container. Should be manually called after a non-auto-removed container
 // is stopped.
-func (c *Container) Remove() {
+func (c *Container) Remove() error {
 	c.runCmd = utils.Command("docker", "rm", "-f", c.Name)
-	err := c.runCmd.Start()
-	Expect(err).NotTo(HaveOccurred())
+	if err := c.runCmd.Start(); err != nil {
+		return err
+	}
 
 	log.WithField("container", c).Info("Removed container.")
+	return nil
 }
 
 func (c *Container) copyOutputToLog(streamName string, stream io.Reader, done *sync.WaitGroup, watches *[]*watch) {
@@ -284,24 +315,26 @@ func (c *Container) copyOutputToLog(streamName string, stream io.Reader, done *s
 	logCxt.Info("Stream finished")
 }
 
-func (c *Container) DockerInspect(format string) string {
+func (c *Container) DockerInspect(format string) (string, error) {
 	inspectCmd := utils.Command("docker", "inspect",
 		"--format="+format,
 		c.Name,
 	)
 	outputBytes, err := inspectCmd.CombinedOutput()
-	Expect(err).NotTo(HaveOccurred())
-	return string(outputBytes)
+	if err != nil {
+		return "", fmt.Errorf("failed to run docker inspect: %v", err)
+	}
+	return string(outputBytes), nil
 }
 
-func (c *Container) GetIP() string {
-	output := c.DockerInspect("{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}")
-	return strings.TrimSpace(output)
+func (c *Container) GetIP() (string, error) {
+	output, err := c.DockerInspect("{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}")
+	return strings.TrimSpace(output), err
 }
 
-func (c *Container) GetHostname() string {
-	output := c.DockerInspect("{{.Config.Hostname}}")
-	return strings.TrimSpace(output)
+func (c *Container) GetHostname() (string, error) {
+	output, err := c.DockerInspect("{{.Config.Hostname}}")
+	return strings.TrimSpace(output), err
 }
 
 func (c *Container) GetPIDs(processName string) []int {
@@ -316,51 +349,64 @@ func (c *Container) GetPIDs(processName string) []int {
 			continue
 		}
 		pid, err := strconv.Atoi(line)
-		Expect(err).NotTo(HaveOccurred())
+		if err != nil {
+			panic(fmt.Sprintf("failed to convert pid '%s' to int. Parsing error?", line))
+		}
 		pids = append(pids, pid)
 	}
 	return pids
 }
 
-func (c *Container) GetSinglePID(processName string) int {
+func (c *Container) GetSinglePID(processName string) (int, error) {
 	// Get the process's PID.  This retry loop ensures that we don't get tripped up if we see multiple
 	// PIDs, which can happen transiently when a process restarts/forks off a subprocess.
 	start := time.Now()
 	for {
 		pids := c.GetPIDs(processName)
 		if len(pids) == 1 {
-			return pids[0]
+			return pids[0], nil
 		}
-		Expect(time.Since(start)).To(BeNumerically("<", time.Second),
-			"Timed out waiting for there to be a single PID")
+
+		if time.Since(start) < time.Second {
+			return 0, errors.New("Timed out waiting for there to be a single PID")
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
 }
 
-func (c *Container) WaitUntilRunning() {
+func (c *Container) WaitUntilRunning() error {
 	log.Info("Wait for container to be listed in docker ps")
 
 	// Set up so we detect if container startup fails.
-	stoppedChan := make(chan struct{})
+	stoppedChan := make(chan error)
 	go func() {
 		defer close(stoppedChan)
-		err := c.runCmd.Wait()
-		log.WithError(err).WithField("name", c.Name).Info("Container stopped ('docker run' exited)")
+		stoppedChan <- c.runCmd.Wait()
+
+		// log.WithError(err).WithField("name", c.Name).Info("Container stopped ('docker run' exited)")
 		c.mutex.Lock()
 		defer c.mutex.Unlock()
 		c.runCmd = nil
 	}()
 
-	for {
-		Expect(stoppedChan).NotTo(BeClosed(), "Container failed before being listed in 'docker ps'")
+	tickChan := time.NewTicker(time.Second).C
 
-		cmd := utils.Command("docker", "ps")
-		out, err := cmd.CombinedOutput()
-		Expect(err).NotTo(HaveOccurred())
-		if strings.Contains(string(out), c.Name) {
-			break
+	for {
+		select {
+		case <-tickChan:
+			cmd := utils.Command("docker", "ps")
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				return err
+			}
+			if strings.Contains(string(out), c.Name) {
+				// success - we found the container in 'docker ps' output.
+				return nil
+			}
+		case err := <-stoppedChan:
+			// the process stopped. whether or not it failed, we return an error.
+			return fmt.Errorf("Container stopped before being listed in 'docker ps': %v", err)
 		}
-		time.Sleep(1000 * time.Millisecond)
 	}
 }
 
@@ -370,18 +416,21 @@ func (c *Container) Stopped() bool {
 	return c.runCmd == nil
 }
 
-func (c *Container) ListedInDockerPS() bool {
+func (c *Container) ListedInDockerPS() (bool, error) {
 	cmd := utils.Command("docker", "ps")
 	out, err := cmd.CombinedOutput()
-	Expect(err).NotTo(HaveOccurred())
-	return strings.Contains(string(out), c.Name)
+	return strings.Contains(string(out), c.Name), err
 }
 
-func (c *Container) WaitNotRunning(timeout time.Duration) {
+func (c *Container) WaitNotRunning(timeout time.Duration) error {
 	log.Info("Wait for container not to be listed in docker ps")
 	start := time.Now()
 	for {
-		if !c.ListedInDockerPS() {
+		isRunning, err := c.ListedInDockerPS()
+		if err != nil {
+			return err
+		}
+		if !isRunning {
 			break
 		}
 		if time.Since(start) > timeout {
@@ -389,6 +438,8 @@ func (c *Container) WaitNotRunning(timeout time.Duration) {
 		}
 		time.Sleep(1000 * time.Millisecond)
 	}
+
+	return nil
 }
 
 func (c *Container) EnsureBinary(name string) {
@@ -406,17 +457,11 @@ func (c *Container) CopyFileIntoContainer(hostPath, containerPath string) error 
 	return cmd.Run()
 }
 
-func (c *Container) Exec(cmd ...string) {
+func (c *Container) Exec(cmd ...string) error {
 	log.WithField("container", c.Name).WithField("command", cmd).Info("Running command")
 	arg := []string{"exec", c.Name}
 	arg = append(arg, cmd...)
-	utils.Run("docker", arg...)
-}
-
-func (c *Container) ExecMayFail(cmd ...string) error {
-	arg := []string{"exec", c.Name}
-	arg = append(arg, cmd...)
-	return utils.RunMayFail("docker", arg...)
+	return utils.Run("docker", arg...)
 }
 
 func (c *Container) ExecOutput(args ...string) (string, error) {
@@ -437,7 +482,7 @@ func (c *Container) SourceName() string {
 	return c.Name
 }
 
-func (c *Container) CanConnectTo(ip, port, protocol string) bool {
+func (c *Container) CanConnectTo(ip, port, protocol string) (bool, error) {
 
 	// Ensure that the container has the 'test-connection' binary.
 	c.EnsureBinary("test-connection")
@@ -446,21 +491,31 @@ func (c *Container) CanConnectTo(ip, port, protocol string) bool {
 	connectionCmd := utils.Command("docker", "exec", c.Name,
 		"/test-connection", "--protocol="+protocol, "-", ip, port)
 	outPipe, err := connectionCmd.StdoutPipe()
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return false, err
+	}
 	errPipe, err := connectionCmd.StderrPipe()
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return false, err
+	}
 	err = connectionCmd.Start()
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return false, err
+	}
 
 	wOut, err := ioutil.ReadAll(outPipe)
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return false, err
+	}
 	wErr, err := ioutil.ReadAll(errPipe)
-	Expect(err).NotTo(HaveOccurred())
+	if err != nil {
+		return false, err
+	}
 	err = connectionCmd.Wait()
 
 	log.WithFields(log.Fields{
 		"stdout": string(wOut),
 		"stderr": string(wErr)}).WithError(err).Info("Connection test")
 
-	return err == nil
+	return false, nil
 }

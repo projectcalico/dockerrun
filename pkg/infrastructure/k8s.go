@@ -22,7 +22,7 @@ import (
 	"github.com/projectcalico/dockerrun/pkg/utils"
 )
 
-func RunK8sApiserver(etcdIp string) *containers.Container {
+func RunK8sApiserver(etcdIp string) (*containers.Container, error) {
 	return containers.Run("apiserver",
 		containers.RunOpts{AutoRemove: true},
 		"-v", os.Getenv("PRIVATE_KEY")+":/private.key",
@@ -37,8 +37,8 @@ func RunK8sApiserver(etcdIp string) *containers.Container {
 	)
 }
 
-func RunK8sControllerManager(apiserverIp string) *containers.Container {
-	c := containers.Run("controller-manager",
+func RunK8sControllerManager(apiserverIp string) (*containers.Container, error) {
+	return containers.Run("controller-manager",
 		containers.RunOpts{AutoRemove: true},
 		"-v", os.Getenv("PRIVATE_KEY")+":/private.key",
 		utils.Config.K8sImage,
@@ -50,5 +50,4 @@ func RunK8sControllerManager(apiserverIp string) *containers.Container {
 		"--v=5",
 		"--service-account-private-key-file=/private.key",
 	)
-	return c
 }
